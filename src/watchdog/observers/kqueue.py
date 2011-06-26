@@ -628,6 +628,7 @@ if platform.is_bsd() or platform.is_darwin():
                 dest_path = absolute_path(new_snapshot.path_for_inode(ref_stat_info.st_ino))
                 if is_directory:
                     event = DirMovedEvent(src_path, dest_path)
+                    self.queue_event(event)
                     # TODO: Do we need to fire moved events for the items
                     # inside the directory tree? Does kqueue does this
                     # all by itself? Check this and then enable this code
@@ -636,7 +637,6 @@ if platform.is_bsd() or platform.is_darwin():
                     if self.watch.is_recursive:
                         for sub_event in event.sub_moved_events():
                             self.queue_event(sub_event)
-                    self.queue_event(event)
                 else:
                     self.queue_event(FileMovedEvent(src_path, dest_path))
             except KeyError:
