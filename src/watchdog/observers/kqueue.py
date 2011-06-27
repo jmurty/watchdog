@@ -539,7 +539,7 @@ if platform.is_bsd() or platform.is_darwin():
             for the directory.
             """
             if dirs_modified:
-                for dir_modified in dirs_modified:
+                for dir_modified, kevent_inode in dirs_modified:
                     self.queue_event(DirModifiedEvent(dir_modified))
                 diff_events = new_snapshot - ref_snapshot
                 for file_created in diff_events.files_created:
@@ -567,6 +567,13 @@ if platform.is_bsd() or platform.is_darwin():
                 descriptor = self._descriptors.get_for_fd(kev.ident)
                 src_path = descriptor.path
 
+                # Get inode for file descriptor
+                inode = None
+                try:
+                    inode = os.fstat(kev.ident).st_ino
+                except:
+                    pass
+
                 if is_deleted(kev):
                     if descriptor.is_directory:
                         self.queue_event(DirDeletedEvent(src_path))
@@ -583,7 +590,7 @@ if platform.is_bsd() or platform.is_darwin():
                         # sub-file/directory renames or new file/directory
                         # creation. We determine all this by comparing
                         # snapshots later.
-                        dirs_modified.add(src_path)
+                        dirs_modified.add((src_path, inode))
                     else:
                         self.queue_event(FileModifiedEvent(src_path))
                 elif is_renamed(kev):
@@ -591,14 +598,15 @@ if platform.is_bsd() or platform.is_darwin():
                     # to, so we have to process these after taking a snapshot
                     # of the directory.
                     if descriptor.is_directory:
-                        dirs_renamed.add(src_path)
+                        dirs_renamed.add((src_path, inode))
                     else:
-                        files_renamed.add(src_path)
+                        files_renamed.add((src_path, inode))
             return files_renamed, dirs_renamed, dirs_modified
 
 
         def _queue_renamed(self,
                            src_path,
+                           kevent_inode,
                            is_directory,
                            ref_snapshot,
                            new_snapshot):
@@ -608,21 +616,32 @@ if platform.is_bsd() or platform.is_darwin():
             destination path of the file system object renamed, and adds
             appropriate events to the event queue.
             """
+            ref_stat_info = None
             try:
                 ref_stat_info = ref_snapshot.stat_info(src_path)
             except KeyError:
-                # Probably caught a temporary file/directory that was renamed
-                # and deleted. Fires a sequence of created and deleted events
-                # for the path.
-                if is_directory:
-                    self.queue_event(DirCreatedEvent(src_path))
-                    self.queue_event(DirDeletedEvent(src_path))
-                else:
-                    self.queue_event(FileCreatedEvent(src_path))
-                    self.queue_event(FileDeletedEvent(src_path))
-                # We don't process any further and bail out assuming
-                # the event represents deletion/creation instead of movement.
-                return
+                # Guard against race condition (?) when multiple files/dirs
+                # are moved at once and the ref_snapshot ends up with some
+                # post-move path keys (instead of pre-move paths only).
+                # In this case find ref_stat_info by inode not original path
+                try:
+                    ref_stat_info = ref_snapshot.stat_info_for_inode(kevent_inode)
+                except:
+                    pass
+
+                if not ref_stat_info:
+                    # Probably caught a temporary file/directory that was renamed
+                    # and deleted. Fires a sequence of created and deleted events
+                    # for the path.
+                    if is_directory:
+                        self.queue_event(DirCreatedEvent(src_path))
+                        self.queue_event(DirDeletedEvent(src_path))
+                    else:
+                        self.queue_event(FileCreatedEvent(src_path))
+                        self.queue_event(FileDeletedEvent(src_path))
+                    # We don't process any further and bail out assuming
+                    # the event represents deletion/creation instead of movement.
+                    return
 
             try:
                 dest_path = absolute_path(new_snapshot.path_for_inode(ref_stat_info.st_ino))
@@ -688,13 +707,15 @@ if platform.is_bsd() or platform.is_darwin():
                     self._snapshot = new_snapshot
 
                     if files_renamed or dirs_renamed or dirs_modified:
-                        for src_path in files_renamed:
+                        for src_path, kevent_inode in files_renamed:
                             self._queue_renamed(src_path,
+                                                kevent_inode,
                                                 False,
                                                 ref_snapshot,
                                                 new_snapshot)
-                        for src_path in dirs_renamed:
+                        for src_path, kevent_inode in dirs_renamed:
                             self._queue_renamed(src_path,
+                                                kevent_inode,
                                                 True,
                                                 ref_snapshot,
                                                 new_snapshot)
